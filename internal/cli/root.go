@@ -28,7 +28,7 @@ func init() {
 		keyCmd,
 		NewVaultCmd(),
 		backupCmd,
-		snapshotsCmd,
+		NewSnapshotsCmd(),
 		restoreCmd,
 		scheduleCmd,
 		coldCopyCmd,
@@ -58,11 +58,6 @@ var backupCmd = &cobra.Command{
 	RunE:  stubCommand,
 }
 
-var snapshotsCmd = &cobra.Command{
-	Use:   "snapshots",
-	Short: "Browse backup snapshots",
-	RunE:  stubCommand,
-}
 
 var restoreCmd = &cobra.Command{
 	Use:   "restore",
