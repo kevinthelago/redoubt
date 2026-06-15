@@ -90,7 +90,7 @@ func TestUnlock_CorrectPassphrase(t *testing.T) {
 	t.Cleanup(func() { clearKeyring(t) })
 
 	const pass = "correct horse battery staple test!"
-	keystore.Init(pass)
+	_, _ = keystore.Init(pass)
 
 	km, _ := keystore.Open()
 	if err := km.Unlock(pass); err != nil {
@@ -108,7 +108,7 @@ func TestUnlock_WrongPassphrase(t *testing.T) {
 	clearKeyring(t)
 	t.Cleanup(func() { clearKeyring(t) })
 
-	keystore.Init("correct horse battery staple test!")
+	_, _ = keystore.Init("correct horse battery staple test!")
 
 	km, _ := keystore.Open()
 	err := km.Unlock("wrong passphrase here!")
@@ -122,17 +122,17 @@ func TestResticPassword_DeterministicAndRequiresUnlock(t *testing.T) {
 	t.Cleanup(func() { clearKeyring(t) })
 
 	const pass = "correct horse battery staple test!"
-	keystore.Init(pass)
+	_, _ = keystore.Init(pass)
 
 	km1, _ := keystore.Open()
-	km1.Unlock(pass)
+	_ = km1.Unlock(pass)
 	p1, err := km1.ResticPassword()
 	if err != nil {
 		t.Fatalf("ResticPassword: %v", err)
 	}
 
 	km2, _ := keystore.Open()
-	km2.Unlock(pass)
+	_ = km2.Unlock(pass)
 	p2, _ := km2.ResticPassword()
 
 	if p1 != p2 {
@@ -152,7 +152,7 @@ func TestAgeRecipientUsable(t *testing.T) {
 	t.Cleanup(func() { clearKeyring(t) })
 
 	const pass = "correct horse battery staple test!"
-	keystore.Init(pass)
+	_, _ = keystore.Init(pass)
 
 	km, _ := keystore.Open()
 	// Should be usable as an age recipient string without unlocking.
@@ -203,10 +203,10 @@ func TestRotate(t *testing.T) {
 	const oldPass = "correct horse battery staple test!"
 	const newPass = "my new long and secure passphrase!"
 
-	keystore.Init(oldPass)
+	_, _ = keystore.Init(oldPass)
 
 	km, _ := keystore.Open()
-	km.Unlock(oldPass)
+	_ = km.Unlock(oldPass)
 
 	wantPub := km.AgeRecipient()
 
@@ -237,10 +237,10 @@ func TestVerify(t *testing.T) {
 	t.Cleanup(func() { clearKeyring(t) })
 
 	const pass = "correct horse battery staple test!"
-	keystore.Init(pass)
+	_, _ = keystore.Init(pass)
 
 	km, _ := keystore.Open()
-	km.Unlock(pass)
+	_ = km.Unlock(pass)
 
 	if err := km.Verify(); err != nil {
 		t.Errorf("Verify failed on healthy keystore: %v", err)

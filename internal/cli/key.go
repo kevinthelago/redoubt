@@ -176,7 +176,7 @@ under a new passphrase of your choice.`,
 
 func init() {
 	keyReconstructCmd.Flags().StringSliceVarP(&reconstructShareFiles, "shares", "s", nil, "share files (comma-separated), e.g. share-1.txt,share-2.txt")
-	keyReconstructCmd.MarkFlagRequired("shares")
+	_ = keyReconstructCmd.MarkFlagRequired("shares")
 }
 
 func runKeyReconstruct(cmd *cobra.Command, _ []string) error {
