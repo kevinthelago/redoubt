@@ -2,28 +2,23 @@
 // Each file in this package defines one command group.
 //
 // This file defines the `redoubt backup` command.
-//
-// DEPENDENCY NOTE: the full wiring of this command (connecting the Pipeline to
-// the concrete foundation/assets/vault packages) will be completed once the
-// following PRs are merged:
-//   - foundation  → internal/config, internal/restic, internal/age, internal/logging
-//   - choose-what-to-back-up → internal/assets
-//   - set-up-vault → internal/vault
-//
-// The command structure, flag parsing, and output formatting are complete.
-// The runBackup function currently returns a placeholder error; search for
-// "TODO(wire)" to find the injection points.
 package cli
 
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/kevinthelago/redoubt/internal/assets"
 	"github.com/kevinthelago/redoubt/internal/backup"
+	"github.com/kevinthelago/redoubt/internal/config"
+	"github.com/kevinthelago/redoubt/internal/logging"
+	"github.com/kevinthelago/redoubt/internal/restic"
 )
 
 // NewBackupCmd returns the `redoubt backup` Cobra command.
@@ -57,47 +52,55 @@ clear error if the vault cannot be contacted — it never hangs waiting.`,
 func runBackup(cmd *cobra.Command, dryRun bool) error {
 	ctx := cmd.Context()
 
-	// TODO(wire): construct the pipeline from concrete foundation/assets/vault packages.
-	//
-	// When all dependency PRs are merged, replace the placeholder below with:
-	//
-	//   cfg, err := config.Load()
-	//   if err != nil {
-	//       return fmt.Errorf("load config: %w", err)
-	//   }
-	//   log := logging.New()
-	//
-	//   vaultProfile, err := vault.LoadProfile(cfg)
-	//   if err != nil {
-	//       return fmt.Errorf("load vault profile: %w", err)
-	//   }
-	//
-	//   ks, err := keystore.Load(cfg)
-	//   if err != nil {
-	//       return fmt.Errorf("load keystore: %w", err)
-	//   }
-	//
-	//   pipe := backup.New(backup.Config{
-	//       Resolver: assets.NewResolver(cfg),
-	//       Sealer:   age.NewSealer(ks),
-	//       Runner:   restic.NewClient(vaultProfile),
-	//       Log:      log,
-	//       LockPath: config.LockPath(cfg),
-	//   })
-	//
-	//   result, err := pipe.Run(ctx, dryRun)
-	//   ...
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
 
-	_ = ctx
-	_ = dryRun
-	return errors.New(
-		"backup command not yet wired: waiting for foundation, choose-what-to-back-up, " +
-			"and set-up-vault PRs to merge",
-	)
+	if cfg.Vault.URL == "" {
+		return errors.New("vault not configured: run 'redoubt vault set' to add a vault profile")
+	}
+
+	log := logging.New(os.Stderr, slog.LevelInfo)
+
+	dataDir := config.DataDir()
+	store := assets.NewStore(dataDir, nil)
+	if err := store.Load(); err != nil {
+		return fmt.Errorf("load tracked assets: %w", err)
+	}
+
+	backend := restic.Backend{
+		Kind:   restic.BackendREST,
+		URL:    cfg.Vault.URL,
+		CACert: cfg.Vault.CACert,
+	}
+	runner := restic.New(backend)
+
+	pipe := backup.New(backup.Config{
+		Resolver: &backup.StoreResolver{Store: store},
+		// TODO(vault): replace with a real age.Sealer once the vault stream
+		// lands recipients. Until then, secrets assets fail-soft with a clear
+		// error rather than being backed up unsealed.
+		Sealer:   backup.ErrSealer{},
+		Runner:   &backup.ResticAdapter{R: runner},
+		Log:      log,
+		LockPath: filepath.Join(dataDir, "backup.lock"),
+		TempBase: os.TempDir(),
+	})
+
+	result, err := pipe.Run(ctx, dryRun)
+	if err != nil {
+		return err
+	}
+
+	printBackupResult(result)
+	if result.HasErrors {
+		os.Exit(backupExitCode(result))
+	}
+	return nil
 }
 
 // printBackupResult writes the backup summary to stdout (and failures to stderr).
-// Called by runBackup once the wire-up is complete.
 func printBackupResult(result *backup.RunResult) {
 	if result.DryRun {
 		printDryRunResult(result)
@@ -143,30 +146,11 @@ func printAssetFailures(result *backup.RunResult) {
 }
 
 // backupExitCode returns 1 if there were any errors, 0 on full success.
-// Used by runBackup to set the process exit code.
 func backupExitCode(result *backup.RunResult) int {
 	if result.HasErrors {
 		return 1
 	}
 	return 0
-}
-
-func formatBytes(b int64) string {
-	const (
-		gib = 1 << 30
-		mib = 1 << 20
-		kib = 1 << 10
-	)
-	switch {
-	case b >= gib:
-		return fmt.Sprintf("%.1f GiB", float64(b)/gib)
-	case b >= mib:
-		return fmt.Sprintf("%.1f MiB", float64(b)/mib)
-	case b >= kib:
-		return fmt.Sprintf("%.1f KiB", float64(b)/kib)
-	default:
-		return fmt.Sprintf("%d B", b)
-	}
 }
 
 func effectiveDedupRatio(stats *backup.BackupStats) float64 {
