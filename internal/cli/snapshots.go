@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/kevinthelago/redoubt/internal/cold"
+	"github.com/kevinthelago/redoubt/internal/config"
+	"github.com/kevinthelago/redoubt/internal/restic"
 	"github.com/kevinthelago/redoubt/internal/snapshots"
 	"github.com/spf13/cobra"
 )
@@ -24,19 +28,58 @@ func NewSnapshotsCmd() *cobra.Command {
 }
 
 // buildClientFactory returns a function that constructs a snapshots.Client
-// for the given source ("vault" or "cold").  The real wiring requires F2
-// (config — vault connection profile + cold drive path) and K1 (keystore —
-// repo password).  Until those streams land this returns a clear error.
+// for the given source ("vault" or "cold").
+//
+// Password resolution: REDOUBT_REPO_PASSWORD env var is the current fallback.
+// TODO(K1): replace os.Getenv with keystore.RepoPassword() once K1 lands.
 func buildClientFactory() func(source string) (snapshots.Client, error) {
 	return func(source string) (snapshots.Client, error) {
-		// Placeholder: replace with:
-		//   cfg, err := config.Load()
-		//   password, err := keystore.RepoPassword()
-		//   backend := resticBackendForSource(source, cfg)
-		//   return snapshots.NewResticAdapter(restic.New(backend, restic.WithPassword(password))), nil
-		return nil, fmt.Errorf(
-			"snapshot client not yet wired: config (F2) and keystore (K1) must land first",
-		)
+		cfg, err := config.Load()
+		if err != nil {
+			return nil, fmt.Errorf("load config: %w", err)
+		}
+
+		// TODO(K1): replace with keystore.RepoPassword() once K1 lands on develop.
+		password := os.Getenv("REDOUBT_REPO_PASSWORD")
+		if password == "" {
+			return nil, fmt.Errorf("REDOUBT_REPO_PASSWORD is not set (keystore integration pending K1)")
+		}
+
+		backend, err := resticBackendForSource(source, cfg)
+		if err != nil {
+			return nil, err
+		}
+		return snapshots.NewResticAdapter(restic.New(backend, restic.WithPassword(password))), nil
+	}
+}
+
+// resticBackendForSource maps the --source flag value to a restic.Backend.
+// "vault" uses the REST backend from the user's config profile.
+// "cold" finds the best-candidate mounted cold drive from the drive registry.
+func resticBackendForSource(source string, cfg *config.Config) (restic.Backend, error) {
+	switch source {
+	case "vault":
+		return restic.Backend{
+			Kind:   restic.BackendREST,
+			URL:    cfg.Vault.URL,
+			CACert: cfg.Vault.CACert,
+		}, nil
+	case "cold":
+		regPath := filepath.Join(config.DataDir(), "cold-registry.toml")
+		reg, err := cold.LoadRegistry(regPath)
+		if err != nil {
+			return restic.Backend{}, fmt.Errorf("load cold drive registry: %w", err)
+		}
+		drive, ok := reg.BestCandidate()
+		if !ok {
+			return restic.Backend{}, fmt.Errorf("no cold drive is currently mounted")
+		}
+		return restic.Backend{
+			Kind: restic.BackendLocal,
+			Path: drive.RepoPath(),
+		}, nil
+	default:
+		return restic.Backend{}, fmt.Errorf("unknown source %q: use \"vault\" or \"cold\"", source)
 	}
 }
 
