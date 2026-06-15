@@ -1,0 +1,383 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/kevinthelago/redoubt/internal/snapshots"
+	"github.com/spf13/cobra"
+)
+
+// NewSnapshotsCmd returns the "redoubt snapshots" command tree.
+// Register it in the root command: rootCmd.AddCommand(NewSnapshotsCmd()).
+//
+// The command's client is supplied via newClient so the real restic+keystore
+// wiring (Foundation/Keys streams) can be injected without importing their
+// packages here.  In production, call NewSnapshotsCmd with a factory that
+// reads the vault connection profile and resolves the keystore password.
+func NewSnapshotsCmd() *cobra.Command {
+	// newClient is replaced by integration glue once F3/K1 land.
+	// Until then the factory returns an error so callers see a clear message.
+	newClient := func(_ string) (snapshots.Client, error) {
+		return nil, fmt.Errorf("restic client not yet wired — Foundation/Keys streams must land first")
+	}
+	return buildSnapshotsCmd(newClient, os.Stdout)
+}
+
+// buildSnapshotsCmd is the testable core; callers inject the client factory and writer.
+func buildSnapshotsCmd(newClient func(source string) (snapshots.Client, error), out io.Writer) *cobra.Command {
+	var (
+		source   string
+		jsonMode bool
+	)
+
+	root := &cobra.Command{
+		Use:   "snapshots",
+		Short: "Browse restic snapshots (read-only)",
+		Long: `Browse restic snapshots stored in the vault or on a cold drive.
+
+All operations are strictly read-only.  Secret entries (age-sealed files)
+are shown as sealed filenames only — their contents are never revealed here.`,
+	}
+	root.PersistentFlags().StringVar(&source, "source", "vault", `snapshot source: "vault" (default) or "cold"`)
+	root.PersistentFlags().BoolVar(&jsonMode, "json", false, "output results as JSON")
+
+	root.AddCommand(
+		buildListCmd(&source, &jsonMode, newClient, out),
+		buildLSCmd(&source, &jsonMode, newClient, out),
+		buildFindCmd(&source, &jsonMode, newClient, out),
+		buildDiffCmd(&source, &jsonMode, newClient, out),
+	)
+
+	return root
+}
+
+// --- list ---
+
+func buildListCmd(source *string, jsonMode *bool, newClient func(string) (snapshots.Client, error), out io.Writer) *cobra.Command {
+	var (
+		tags     []string
+		hostname string
+		after    string
+		before   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List snapshots",
+		Long:  "List snapshots, optionally filtered by category tag, hostname, or date range.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			filter, err := buildFilter(tags, hostname, after, before)
+			if err != nil {
+				return err
+			}
+			client, err := newClient(*source)
+			if err != nil {
+				return err
+			}
+			browser := snapshots.New(client)
+			snaps, err := browser.List(cmd.Context(), filter)
+			if err != nil {
+				return err
+			}
+			if *jsonMode {
+				return writeJSON(out, snaps)
+			}
+			return printSnapshotList(out, snaps)
+		},
+	}
+	cmd.Flags().StringArrayVar(&tags, "tag", nil, "filter by category tag (repeatable; AND-matched)")
+	cmd.Flags().StringVar(&hostname, "host", "", "filter by hostname")
+	cmd.Flags().StringVar(&after, "after", "", "show snapshots taken after this time (RFC3339 or YYYY-MM-DD)")
+	cmd.Flags().StringVar(&before, "before", "", "show snapshots taken before this time (RFC3339 or YYYY-MM-DD)")
+	return cmd
+}
+
+// --- ls ---
+
+func buildLSCmd(source *string, jsonMode *bool, newClient func(string) (snapshots.Client, error), out io.Writer) *cobra.Command {
+	var path string
+
+	cmd := &cobra.Command{
+		Use:   "ls <snapshot-id>",
+		Short: "List files in a snapshot",
+		Long: `List the file tree within a snapshot.
+
+Secret entries (age-sealed files) are displayed as sealed filenames only.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			snapshotID := args[0]
+			client, err := newClient(*source)
+			if err != nil {
+				return err
+			}
+
+			// Determine whether we need to look up the snapshot's tags to
+			// identify secrets snapshots.  We do a quick List with ID filter
+			// to get the metadata.
+			browser := snapshots.New(client)
+			all, err := browser.List(cmd.Context(), snapshots.SnapshotFilter{})
+			if err != nil {
+				return err
+			}
+			isSecretSnap := false
+			for _, s := range all {
+				if strings.HasPrefix(s.ID, snapshotID) || s.ShortID == snapshotID {
+					isSecretSnap = s.IsSecretSnapshot()
+					break
+				}
+			}
+
+			var nodes []snapshots.TreeNode
+			if isSecretSnap {
+				nodes, err = browser.LSSealed(cmd.Context(), snapshotID, path)
+			} else {
+				nodes, err = browser.LS(cmd.Context(), snapshotID, path)
+			}
+			if err != nil {
+				return err
+			}
+			if *jsonMode {
+				return writeJSON(out, nodes)
+			}
+			return printFileTree(out, nodes)
+		},
+	}
+	cmd.Flags().StringVar(&path, "path", "", "list only files under this path prefix")
+	return cmd
+}
+
+// --- find ---
+
+func buildFindCmd(source *string, jsonMode *bool, newClient func(string) (snapshots.Client, error), out io.Writer) *cobra.Command {
+	var (
+		tags     []string
+		hostname string
+		after    string
+		before   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "find <path>",
+		Short: "Find a path across snapshots",
+		Long: `Find files matching a path pattern across all snapshots.
+
+The path may be an exact path or a glob pattern.  Filters restrict which
+snapshots are searched.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pattern := args[0]
+			filter, err := buildFilter(tags, hostname, after, before)
+			if err != nil {
+				return err
+			}
+			client, err := newClient(*source)
+			if err != nil {
+				return err
+			}
+			browser := snapshots.New(client)
+			results, err := browser.Find(cmd.Context(), pattern, filter)
+			if err != nil {
+				return err
+			}
+			if *jsonMode {
+				return writeJSON(out, results)
+			}
+			return printFindResults(out, results)
+		},
+	}
+	cmd.Flags().StringArrayVar(&tags, "tag", nil, "restrict search to snapshots with this tag (repeatable; AND-matched)")
+	cmd.Flags().StringVar(&hostname, "host", "", "restrict search to snapshots from this hostname")
+	cmd.Flags().StringVar(&after, "after", "", "restrict search to snapshots taken after this time")
+	cmd.Flags().StringVar(&before, "before", "", "restrict search to snapshots taken before this time")
+	return cmd
+}
+
+// --- diff ---
+
+func buildDiffCmd(source *string, jsonMode *bool, newClient func(string) (snapshots.Client, error), out io.Writer) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "diff <snapshot-a> <snapshot-b>",
+		Short: "Show differences between two snapshots",
+		Long: `Compare two snapshots and list the paths that changed.
+
+Secret entries (age-sealed files) are shown as sealed filenames only.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := newClient(*source)
+			if err != nil {
+				return err
+			}
+			browser := snapshots.New(client)
+			entries, err := browser.Diff(cmd.Context(), args[0], args[1])
+			if err != nil {
+				return err
+			}
+			if *jsonMode {
+				return writeJSON(out, entries)
+			}
+			return printDiff(out, entries)
+		},
+	}
+	return cmd
+}
+
+// --- output helpers ---
+
+func printSnapshotList(out io.Writer, snaps []snapshots.Snapshot) error {
+	if len(snaps) == 0 {
+		fmt.Fprintln(out, "No snapshots found. Run `redoubt backup` to create the first one.")
+		return nil
+	}
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "ID\tTIME\tHOST\tTAGS\tSIZE")
+	for _, s := range snaps {
+		tags := strings.Join(s.Tags, ",")
+		if tags == "" {
+			tags = "-"
+		}
+		size := formatBytes(s.BytesAdded)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+			s.ShortID,
+			s.Time.Format(time.RFC3339),
+			s.Hostname,
+			tags,
+			size,
+		)
+	}
+	return w.Flush()
+}
+
+func printFileTree(out io.Writer, nodes []snapshots.TreeNode) error {
+	if len(nodes) == 0 {
+		fmt.Fprintln(out, "(empty)")
+		return nil
+	}
+	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	for _, n := range nodes {
+		typeChar := "-"
+		if n.Type == "dir" {
+			typeChar = "d"
+		} else if n.Type == "symlink" {
+			typeChar = "l"
+		}
+		sealed := ""
+		if n.IsSealed {
+			sealed = " [sealed]"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s%s\n", typeChar, formatBytes(n.Size), n.Path, sealed)
+	}
+	return w.Flush()
+}
+
+func printFindResults(out io.Writer, results []snapshots.FindResult) error {
+	if len(results) == 0 {
+		fmt.Fprintln(out, "No matches found.")
+		return nil
+	}
+	for _, r := range results {
+		fmt.Fprintf(out, "snapshot %s (%s)\n", r.Snapshot.ShortID, r.Snapshot.Time.Format(time.RFC3339))
+		for _, m := range r.Matches {
+			sealed := ""
+			if m.IsSealed {
+				sealed = " [sealed]"
+			}
+			fmt.Fprintf(out, "  %s%s\n", m.Path, sealed)
+		}
+	}
+	return nil
+}
+
+func printDiff(out io.Writer, entries []snapshots.DiffEntry) error {
+	if len(entries) == 0 {
+		fmt.Fprintln(out, "No differences.")
+		return nil
+	}
+	for _, e := range entries {
+		symbol := changeSymbol(e.ChangeType)
+		sealed := ""
+		if e.IsSealed {
+			sealed = " [sealed]"
+		}
+		fmt.Fprintf(out, "%s %s%s\n", symbol, e.Path, sealed)
+	}
+	return nil
+}
+
+func changeSymbol(ct string) string {
+	switch ct {
+	case "added":
+		return "+"
+	case "removed":
+		return "-"
+	case "changed":
+		return "~"
+	default:
+		return "?"
+	}
+}
+
+func writeJSON(out io.Writer, v any) error {
+	enc := json.NewEncoder(out)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+// --- filter builder ---
+
+func buildFilter(tags []string, hostname, after, before string) (snapshots.SnapshotFilter, error) {
+	f := snapshots.SnapshotFilter{
+		Tags:     tags,
+		Hostname: hostname,
+	}
+	if after != "" {
+		t, err := parseTime(after)
+		if err != nil {
+			return f, fmt.Errorf("--after: %w", err)
+		}
+		f.After = t
+	}
+	if before != "" {
+		t, err := parseTime(before)
+		if err != nil {
+			return f, fmt.Errorf("--before: %w", err)
+		}
+		f.Before = t
+	}
+	return f, nil
+}
+
+// parseTime accepts RFC3339 or YYYY-MM-DD date strings.
+func parseTime(s string) (time.Time, error) {
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		// Treat a bare date as the start of that UTC day.
+		return t, nil
+	}
+	return time.Time{}, fmt.Errorf("cannot parse %q as RFC3339 or YYYY-MM-DD", s)
+}
+
+func formatBytes(b int64) string {
+	const (
+		KB = 1024
+		MB = 1024 * KB
+		GB = 1024 * MB
+	)
+	switch {
+	case b >= GB:
+		return fmt.Sprintf("%.1f GiB", float64(b)/float64(GB))
+	case b >= MB:
+		return fmt.Sprintf("%.1f MiB", float64(b)/float64(MB))
+	case b >= KB:
+		return fmt.Sprintf("%.1f KiB", float64(b)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
+}
