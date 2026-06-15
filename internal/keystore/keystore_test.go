@@ -1,12 +1,20 @@
 package keystore_test
 
 import (
+	"os"
 	"testing"
 
 	"filippo.io/age"
 	"github.com/kevinthelago/redoubt/internal/keystore"
 	"github.com/zalando/go-keyring"
 )
+
+// TestMain installs an in-memory keyring mock so tests run without a
+// libsecret daemon (CI) or OS keychain access (macOS/Windows sandboxes).
+func TestMain(m *testing.M) {
+	keyring.MockInit()
+	os.Exit(m.Run())
+}
 
 // clearKeyring removes all keyring entries for the "redoubt" service.
 // Call before and after each test to guarantee isolation.
