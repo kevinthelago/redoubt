@@ -1,0 +1,18 @@
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+
+# Build output
+/dist/
+/bin/
+
+# IDE
+.idea/
+.vscode/
+*.swp
