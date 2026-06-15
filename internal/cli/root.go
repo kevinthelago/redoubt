@@ -26,7 +26,7 @@ func init() {
 	rootCmd.AddCommand(
 		versionCmd,
 		keyCmd,
-		vaultCmd,
+		NewVaultCmd(),
 		backupCmd,
 		snapshotsCmd,
 		restoreCmd,
@@ -50,12 +50,6 @@ var versionCmd = &cobra.Command{
 var keyCmd = &cobra.Command{
 	Use:   "key",
 	Short: "Manage encryption keys and break-glass escrow",
-}
-
-var vaultCmd = &cobra.Command{
-	Use:   "vault",
-	Short: "Manage the LAN restic REST vault",
-	RunE:  stubCommand,
 }
 
 var backupCmd = &cobra.Command{
