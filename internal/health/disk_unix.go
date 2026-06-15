@@ -8,11 +8,12 @@ import (
 )
 
 // diskUsedPct returns the percentage of disk space used on the volume that holds
-// the Redoubt data directory.
+// the Redoubt data directory, falling back to the filesystem root so that disk
+// always returns a grade even before the data directory is created.
 func diskUsedPct() (float64, error) {
 	dir, err := DataDir()
 	if err != nil {
-		dir = os.TempDir()
+		dir = "/"
 	}
 
 	var stat syscall.Statfs_t

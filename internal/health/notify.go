@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/gen2brain/beeep"
 )
 
 const (
@@ -81,9 +79,9 @@ func (n *Notifier) Notify(ctx context.Context, current Status) error {
 func (n *Notifier) send(ctx context.Context, signal string, ss SignalStatus) error {
 	title, body := buildMessage(signal, ss)
 
-	// Desktop notification (beeep handles Windows/Linux/macOS).
-	if err := beeep.Notify("Redoubt — "+title, body, ""); err != nil {
-		// beeep can fail on headless systems; treat as non-fatal.
+	// Desktop notification — platform-specific implementation in notify_{os}.go.
+	if err := platformNotify("Redoubt — "+title, body); err != nil {
+		// Non-fatal: notifications fail on headless systems.
 		fmt.Printf("desktop notify: %v\n", err)
 	}
 

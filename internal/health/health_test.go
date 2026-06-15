@@ -68,13 +68,19 @@ func TestNoHistory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if s.Overall != GradeUnknown {
-		t.Errorf("overall = %v, want Unknown", s.Overall)
-	}
+	// Disk is always graded from actual system data — skip it here.
 	for name, sig := range s.Signals {
+		if name == SignalDisk {
+			continue
+		}
 		if sig.Grade != GradeUnknown {
 			t.Errorf("signal %s = %v, want Unknown", name, sig.Grade)
 		}
+	}
+	// Core invariant: overall must NEVER be Healthy when there is no history.
+	// (It will be Unknown on a fresh system, or Warning/Critical if disk is elevated.)
+	if s.Overall == GradeHealthy {
+		t.Errorf("overall = Healthy with no backup history — false green!")
 	}
 }
 
@@ -119,9 +125,7 @@ func TestAllHealthy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Evaluate: %v", err)
 	}
-	if s.Overall != GradeHealthy {
-		t.Errorf("overall = %v, want Healthy; signals: %v", s.Overall, s.Signals)
-	}
+
 	for name, sig := range s.Signals {
 		if name == SignalDisk {
 			continue // disk grade depends on the test host
@@ -129,6 +133,16 @@ func TestAllHealthy(t *testing.T) {
 		if sig.Grade != GradeHealthy {
 			t.Errorf("signal %s = %v (%s), want Healthy", name, sig.Grade, sig.Message)
 		}
+	}
+
+	// Overall is Healthy unless disk alone is elevated on the test host.
+	diskGrade := s.Signals[SignalDisk].Grade
+	wantOverall := GradeHealthy
+	if diskGrade > GradeHealthy {
+		wantOverall = diskGrade
+	}
+	if s.Overall != wantOverall {
+		t.Errorf("overall = %v, want %v (disk signal = %v)", s.Overall, wantOverall, diskGrade)
 	}
 }
 
