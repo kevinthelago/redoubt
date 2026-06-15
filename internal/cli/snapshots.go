@@ -14,19 +14,30 @@ import (
 )
 
 // NewSnapshotsCmd returns the "redoubt snapshots" command tree.
-// Register it in the root command: rootCmd.AddCommand(NewSnapshotsCmd()).
+// Register it in root.go: replace the stub snapshotsCmd with NewSnapshotsCmd().
 //
-// The command's client is supplied via newClient so the real restic+keystore
-// wiring (Foundation/Keys streams) can be injected without importing their
-// packages here.  In production, call NewSnapshotsCmd with a factory that
-// reads the vault connection profile and resolves the keystore password.
+// TODO(integration): wire config (F2) and keystore (K1) once those streams
+// land; replace the factory body below with real credential resolution.
 func NewSnapshotsCmd() *cobra.Command {
-	// newClient is replaced by integration glue once F3/K1 land.
-	// Until then the factory returns an error so callers see a clear message.
-	newClient := func(_ string) (snapshots.Client, error) {
-		return nil, fmt.Errorf("restic client not yet wired — Foundation/Keys streams must land first")
-	}
+	newClient := buildClientFactory()
 	return buildSnapshotsCmd(newClient, os.Stdout)
+}
+
+// buildClientFactory returns a function that constructs a snapshots.Client
+// for the given source ("vault" or "cold").  The real wiring requires F2
+// (config — vault connection profile + cold drive path) and K1 (keystore —
+// repo password).  Until those streams land this returns a clear error.
+func buildClientFactory() func(source string) (snapshots.Client, error) {
+	return func(source string) (snapshots.Client, error) {
+		// Placeholder: replace with:
+		//   cfg, err := config.Load()
+		//   password, err := keystore.RepoPassword()
+		//   backend := resticBackendForSource(source, cfg)
+		//   return snapshots.NewResticAdapter(restic.New(backend, restic.WithPassword(password))), nil
+		return nil, fmt.Errorf(
+			"snapshot client not yet wired: config (F2) and keystore (K1) must land first",
+		)
+	}
 }
 
 // buildSnapshotsCmd is the testable core; callers inject the client factory and writer.
