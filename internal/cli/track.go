@@ -1,4 +1,3 @@
-// Package cli assembles the Redoubt command-line interface.
 package cli
 
 import (
@@ -7,12 +6,36 @@ import (
 	"text/tabwriter"
 
 	"github.com/kevinthelago/redoubt/internal/assets"
+	"github.com/kevinthelago/redoubt/internal/config"
 	"github.com/spf13/cobra"
 )
 
-// NewTrackCmd returns the `redoubt track` command with its subcommands.
-// store must already be loaded (call store.Load before passing it in).
-// scanner and ex may be nil; defaults are used when nil.
+// init wires the full track sub-commands onto the trackCmd stub declared in
+// root.go. The asset store is opened lazily from config.DataDir() on each
+// command invocation so that initialisation errors are reported to the user
+// rather than causing a silent startup failure.
+func init() {
+	trackCmd.Long = `Manage the set of filesystem paths that Redoubt backs up.
+
+Each asset is tagged with a category:
+  source    — source code and project files
+  secrets   — credentials, keys, and sensitive configuration
+  database  — databases (requires a validated dump command)
+  config    — application and system configuration files`
+
+	// Clear the stub RunE so that bare "redoubt track" shows help.
+	trackCmd.RunE = nil
+	trackCmd.AddCommand(
+		newTrackAddCmd(nil),
+		newTrackListCmd(nil),
+		newTrackRemoveCmd(nil),
+		newTrackScanCmd(nil, nil, nil),
+	)
+}
+
+// NewTrackCmd returns a self-contained track command tree backed by the
+// provided store, scanner, and excluder. Intended for integration tests.
+// nil values are replaced with config-backed / default implementations.
 func NewTrackCmd(store *assets.Store, scanner *assets.Scanner, ex *assets.Excluder) *cobra.Command {
 	if scanner == nil {
 		scanner = assets.DefaultScanner()
@@ -20,7 +43,6 @@ func NewTrackCmd(store *assets.Store, scanner *assets.Scanner, ex *assets.Exclud
 	if ex == nil {
 		ex = assets.NewExcluder(nil)
 	}
-
 	cmd := &cobra.Command{
 		Use:   "track",
 		Short: "Manage the set of tracked assets",
@@ -41,7 +63,21 @@ Each asset is tagged with a category:
 	return cmd
 }
 
-func newTrackAddCmd(store *assets.Store) *cobra.Command {
+// openStore loads the asset store from config.DataDir().
+func openStore() (*assets.Store, error) {
+	store := assets.NewStore(config.DataDir(), assets.NopLogger())
+	return store, store.Load()
+}
+
+// resolveStore returns s if non-nil; otherwise opens a fresh store.
+func resolveStore(s *assets.Store) (*assets.Store, error) {
+	if s != nil {
+		return s, nil
+	}
+	return openStore()
+}
+
+func newTrackAddCmd(s *assets.Store) *cobra.Command {
 	var catStr string
 	var dumpCmd string
 
@@ -54,8 +90,7 @@ func newTrackAddCmd(store *assets.Store) *cobra.Command {
 		Use:   "add <path>",
 		Short: "Add a path to the tracked asset set",
 		Args:  cobra.ExactArgs(1),
-		PreRunE: func(cmd *cobra.Command, args []string) error {
-			// Expand a preset name to its full command template before validation.
+		PreRunE: func(_ *cobra.Command, _ []string) error {
 			if assets.Category(catStr) == assets.CategoryDatabase {
 				if tmpl, ok := assets.PresetCommand(dumpCmd); ok {
 					dumpCmd = tmpl
@@ -64,6 +99,10 @@ func newTrackAddCmd(store *assets.Store) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := resolveStore(s)
+			if err != nil {
+				return err
+			}
 			cat := assets.Category(catStr)
 			if err := store.Add(args[0], cat, dumpCmd); err != nil {
 				return err
@@ -82,17 +121,20 @@ func newTrackAddCmd(store *assets.Store) *cobra.Command {
 	return cmd
 }
 
-func newTrackListCmd(store *assets.Store) *cobra.Command {
+func newTrackListCmd(s *assets.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
 		Short: "List all tracked assets",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			store, err := resolveStore(s)
+			if err != nil {
+				return err
+			}
 			items := store.List()
 			if len(items) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "no assets tracked — add one with: redoubt track add <path> --type <category>")
 				return nil
 			}
-
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
 			fmt.Fprintln(w, "CATEGORY\tPATH\tSIZE\tLAST BACKUP")
 			for _, a := range items {
@@ -105,12 +147,16 @@ func newTrackListCmd(store *assets.Store) *cobra.Command {
 	}
 }
 
-func newTrackRemoveCmd(store *assets.Store) *cobra.Command {
+func newTrackRemoveCmd(s *assets.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove <path>",
 		Short: "Remove a path from the tracked asset set",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			store, err := resolveStore(s)
+			if err != nil {
+				return err
+			}
 			if err := store.Remove(args[0]); err != nil {
 				return err
 			}
@@ -120,7 +166,7 @@ func newTrackRemoveCmd(store *assets.Store) *cobra.Command {
 	}
 }
 
-func newTrackScanCmd(store *assets.Store, scanner *assets.Scanner, ex *assets.Excluder) *cobra.Command {
+func newTrackScanCmd(s *assets.Store, sc *assets.Scanner, ex *assets.Excluder) *cobra.Command {
 	return &cobra.Command{
 		Use:   "scan",
 		Short: "Scan non-secret assets for likely secrets and suggest re-tagging",
@@ -129,13 +175,25 @@ func newTrackScanCmd(store *assets.Store, scanner *assets.Scanner, ex *assets.Ex
 Matched values are never printed. Only the file, line number, and rule
 description are reported. Assets tagged "secrets" are skipped.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			items := store.List()
-
-			results, err := scanner.ScanAssets(items, ex)
+			store, err := resolveStore(s)
 			if err != nil {
 				return err
 			}
+			scanner := sc
+			if scanner == nil {
+				scanner = assets.DefaultScanner()
+			}
+			excluder := ex
+			if excluder == nil {
+				globalEx, _ := assets.LoadDataDirExcludes(config.DataDir())
+				excluder = globalEx
+			}
 
+			items := store.List()
+			results, err := scanner.ScanAssets(items, excluder)
+			if err != nil {
+				return err
+			}
 			if len(results) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "no likely secrets found in non-secret assets")
 				return nil
@@ -151,7 +209,6 @@ description are reported. Assets tagged "secrets" are skipped.`,
 				return err
 			}
 
-			// Collect affected asset paths for the re-tagging suggestion.
 			affected := make(map[string]bool)
 			for _, r := range results {
 				affected[r.AssetPath] = true
@@ -162,7 +219,6 @@ description are reported. Assets tagged "secrets" are skipped.`,
 				fmt.Fprintf(cmd.ErrOrStderr(), "  redoubt track remove %s\n", p)
 				fmt.Fprintf(cmd.ErrOrStderr(), "  redoubt track add    %s --type secrets\n", p)
 			}
-
 			return nil
 		},
 	}

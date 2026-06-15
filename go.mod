@@ -1,10 +1,16 @@
 module github.com/kevinthelago/redoubt
 
-go 1.22.0
+go 1.22
 
-require github.com/spf13/cobra v1.8.1
+require (
+	filippo.io/age v1.2.1
+	github.com/BurntSushi/toml v1.4.0
+	github.com/spf13/cobra v1.8.1
+)
 
 require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
+	golang.org/x/crypto v0.27.0 // indirect
+	golang.org/x/sys v0.25.0 // indirect
 )
