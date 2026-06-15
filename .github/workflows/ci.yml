@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    name: Vet, Test & Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Install restic
+        run: sudo apt-get install -y restic
+
+      - name: Download dependencies
+        run: go mod tidy
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+  cross:
+    name: Cross-compile
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache: true
+
+      - name: Download dependencies
+        run: go mod tidy
+
+      - name: Cross-compile windows/amd64
+        run: |
+          GOOS=windows GOARCH=amd64 go build -o bin/redoubt-windows-amd64.exe ./cmd/redoubt
+
+      - name: Cross-compile linux/amd64
+        run: |
+          GOOS=linux GOARCH=amd64 go build -o bin/redoubt-linux-amd64 ./cmd/redoubt
+
+      - name: Cross-compile linux/arm64
+        run: |
+          GOOS=linux GOARCH=arm64 go build -o bin/redoubt-linux-arm64 ./cmd/redoubt
