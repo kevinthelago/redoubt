@@ -12,6 +12,7 @@ import (
 
 	"github.com/kevinthelago/redoubt/internal/cold"
 	"github.com/kevinthelago/redoubt/internal/config"
+	"github.com/kevinthelago/redoubt/internal/keystore"
 	"github.com/kevinthelago/redoubt/internal/restic"
 	"github.com/kevinthelago/redoubt/internal/snapshots"
 	"github.com/spf13/cobra"
@@ -30,8 +31,11 @@ func NewSnapshotsCmd() *cobra.Command {
 // buildClientFactory returns a function that constructs a snapshots.Client
 // for the given source ("vault" or "cold").
 //
-// Password resolution: REDOUBT_REPO_PASSWORD env var is the current fallback.
-// TODO(K1): replace os.Getenv with keystore.RepoPassword() once K1 lands.
+// Password resolution order:
+//  1. REDOUBT_REPO_PASSWORD env var — direct bypass (testing/daemon).
+//  2. REDOUBT_PASSPHRASE env var — unlocks the keystore, derives the password.
+//
+// Interactive terminal prompting is handled at the root-command level (not here).
 func buildClientFactory() func(source string) (snapshots.Client, error) {
 	return func(source string) (snapshots.Client, error) {
 		cfg, err := config.Load()
@@ -39,10 +43,9 @@ func buildClientFactory() func(source string) (snapshots.Client, error) {
 			return nil, fmt.Errorf("load config: %w", err)
 		}
 
-		// TODO(K1): replace with keystore.RepoPassword() once K1 lands on develop.
-		password := os.Getenv("REDOUBT_REPO_PASSWORD")
-		if password == "" {
-			return nil, fmt.Errorf("REDOUBT_REPO_PASSWORD is not set (keystore integration pending K1)")
+		password, err := resolveRepoPassword()
+		if err != nil {
+			return nil, err
 		}
 
 		backend, err := resticBackendForSource(source, cfg)
@@ -51,6 +54,29 @@ func buildClientFactory() func(source string) (snapshots.Client, error) {
 		}
 		return snapshots.NewResticAdapter(restic.New(backend, restic.WithPassword(password))), nil
 	}
+}
+
+// resolveRepoPassword resolves the restic repository password.
+// It tries REDOUBT_REPO_PASSWORD first (direct bypass), then falls back to
+// unlocking the keystore with REDOUBT_PASSPHRASE.
+func resolveRepoPassword() (string, error) {
+	if pw := os.Getenv("REDOUBT_REPO_PASSWORD"); pw != "" {
+		return pw, nil
+	}
+	passphrase := os.Getenv("REDOUBT_PASSPHRASE")
+	if passphrase == "" {
+		return "", fmt.Errorf(
+			"set REDOUBT_REPO_PASSWORD (direct) or REDOUBT_PASSPHRASE (keystore unlock)",
+		)
+	}
+	km, err := keystore.Open()
+	if err != nil {
+		return "", fmt.Errorf("open keystore: %w", err)
+	}
+	if err := km.Unlock(passphrase); err != nil {
+		return "", fmt.Errorf("unlock keystore: %w", err)
+	}
+	return km.ResticPassword()
 }
 
 // resticBackendForSource maps the --source flag value to a restic.Backend.
