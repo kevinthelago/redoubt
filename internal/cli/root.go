@@ -50,7 +50,6 @@ var versionCmd = &cobra.Command{
 var keyCmd = &cobra.Command{
 	Use:   "key",
 	Short: "Manage encryption keys and break-glass escrow",
-	RunE:  stubCommand,
 }
 
 var vaultCmd = &cobra.Command{
