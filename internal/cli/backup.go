@@ -35,7 +35,11 @@ Fail-soft: if one asset fails, the others still capture. The run exits non-zero
 if any asset failed or if the backup step itself encountered an error.
 
 The vault must be reachable on the LAN. The command fails immediately with a
-clear error if the vault cannot be contacted — it never hangs waiting.`,
+clear error if the vault cannot be contacted — it never hangs waiting.
+
+Password resolution (same as 'redoubt snapshots'):
+  1. REDOUBT_REPO_PASSWORD env var — direct bypass.
+  2. REDOUBT_PASSPHRASE env var   — unlocks the keystore to derive the password.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runBackup(cmd, dryRun)
 		},
@@ -61,6 +65,11 @@ func runBackup(cmd *cobra.Command, dryRun bool) error {
 		return errors.New("vault not configured: run 'redoubt vault set' to add a vault profile")
 	}
 
+	password, err := resolveRepoPassword()
+	if err != nil {
+		return err
+	}
+
 	log := logging.New(os.Stderr, slog.LevelInfo)
 
 	dataDir := config.DataDir()
@@ -74,15 +83,11 @@ func runBackup(cmd *cobra.Command, dryRun bool) error {
 		URL:    cfg.Vault.URL,
 		CACert: cfg.Vault.CACert,
 	}
-	runner := restic.New(backend)
 
 	pipe := backup.New(backup.Config{
 		Resolver: &backup.StoreResolver{Store: store},
-		// TODO(vault): replace with a real age.Sealer once the vault stream
-		// lands recipients. Until then, secrets assets fail-soft with a clear
-		// error rather than being backed up unsealed.
-		Sealer:   backup.ErrSealer{},
-		Runner:   &backup.ResticAdapter{R: runner},
+		Sealer:   &backup.KeystoreSealer{},
+		Runner:   &backup.ResticAdapter{R: restic.New(backend, restic.WithPassword(password))},
 		Log:      log,
 		LockPath: filepath.Join(dataDir, "backup.lock"),
 		TempBase: os.TempDir(),
